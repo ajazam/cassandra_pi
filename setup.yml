@@ -1,0 +1,101 @@
+---
+- hosts: nodes
+  remote_user: root
+  gather_facts: false
+  tags: 
+    - install_jdk
+  tasks:
+    - name: fetch oracle jdk
+      local_action: 'command wget --no-check-certificate --no-cookies --header "Cookie: oraclelicense=accept-securebackup-cookie" "{{ jdk_download_location }}" --directory-prefix=/tmp/'
+      run_once: true   
+
+    - name: transfer jdk from ansible host to raspberrypi
+      copy: src=/tmp/{{ jdk_file }} dest=/tmp/{{ jdk_file }}
+
+    - name: unarchive jdk download
+      unarchive: copy=yes src=/tmp/{{ jdk_file }} dest=/opt 
+
+    - name: rename jdk directory-prefix 
+      command: mv {{jdk_home}}{{ jdk_version }} {{jdk_home}}/
+
+    - name: Add JAVA_HOME environment variable
+      lineinfile: dest=/etc/profile line="export JAVA_HOME={{jdk_home}}" state=present
+
+    - name: update PATH
+      lineinfile: dest=/etc/profile line="export PATH=$PATH:$JAVA_HOME/bin" state=present
+
+- hosts: nodes
+  remote_user: root    
+  gather_facts: false
+  tags:
+    - remove_jdk
+  tasks:
+    - name: remove jdk
+      file: dest={{jdk_home}} state=absent
+
+    - name: remove JAVA_HOME
+      lineinfile: dest=/etc/profile line="export JAVA_HOME={{jdk_home}}" state=absent
+
+    - name: remove JAVA_HOME/bin path
+      lineinfile: dest=/etc/profile line="export PATH=$PATH:$JAVA_HOME/bin" state=absent
+
+- hosts: nodes
+  remote_user: root  
+  vars:
+    cassandra: apache-cassandra-{{ cassandra_version }}
+    seeds: "{%- for host in groups.seeds -%} {{ host }} {%if not loop.last %},{%- endif -%} {%- endfor -%}"
+  tags:
+    - install_cassandra
+  tasks:  
+     
+    - name: Check if cassandra package exists
+      local_action: stat path=/tmp/apache-cassandra-{{ cassandra_version }}-bin.tar.gz
+      register: cassandra_file
+
+    - name: fetch cassandra
+      local_action: 'command wget "http://mirror.ox.ac.uk/sites/rsync.apache.org/cassandra/{{ cassandra_version }}/apache-cassandra-{{ cassandra_version }}-bin.tar.gz" --directory-prefix=/tmp/'
+      run_once: true
+      when: cassandra_file.stat.exists != true
+
+    - name: unarchive cassandra download
+      unarchive: copy=yes src=/tmp/{{ cassandra }}-bin.tar.gz dest=/opt 
+
+    - name: rename apache-cassandra directory-prefix 
+      command: mv /opt/{{ cassandra }} {{cassandra_home}} 
+
+    - name: Change configuration
+      lineinfile: dest={{cassandra_home}}/conf/cassandra.yaml regexp="{{ item.old }}" line="{{ item.new }}" state="present" backrefs=yes
+      with_items: 
+        - { old: "^cluster_name", new: "cluster_name: '{{cluster_name}}'" } 
+        - { old: '          - seeds:', new: '          - seeds:  \"{{ seeds }}\"' }
+        - { old: "^listen_address: localhost", new: "listen_address: {{  ansible_eth0.ipv4.address }}" }
+        - { old: "^rpc_address: localhost", new: "rpc_address: {{  ansible_eth0.ipv4.address }}" } 
+
+    - name: install cassandra service
+      template: src=config/apache-cassandra dest=/etc/init.d/{{service_name}}
+
+    - name: change permissions for cassandra service script
+      command: chmod +x /etc/init.d/{{service_name}}
+
+    - name: set apache-cassandra service to autostart
+      service: name={{service_name}} enabled=yes state=stopped
+
+
+- hosts: nodes
+  remote_user: root
+  gather_facts: false
+  tags:
+    - remove_cassandra
+  tasks:
+    - name: stop apache-cassandra service
+      service: name={{service_name}} state=stopped enabled=no
+      ignore_errors: yes
+
+    - name: delete apache-cassandra service file
+      file: dest=/etc/init.d/{{service_name}} state=absent
+      ignore_errors: yes
+
+    - name: delete apache-cassandra directory
+      file: dest={{cassandra_home}} state=absent  
+      ignore_errors: yes
+ 
